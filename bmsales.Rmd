@@ -1,0 +1,198 @@
+---
+title: "Big Mart Sales"
+output: html_notebook
+---
+
+
+```{r}
+# Reading into data frames and loading required packages
+library(dplyr)
+library(ggplot2)
+library(rpart)
+setwd("C:/Users/ankit/Desktop/R/big mart sales/")
+train <- read.csv("Train_UWu5bXk.csv",na.strings = c("","NaN"," "), stringsAsFactors = FALSE)
+test <- read.csv("Test_u94Q5KV.csv",na.strings = c("","NaN"," "),stringsAsFactors = FALSE)
+test$Item_Outlet_Sales <- as.factor("NA")
+```
+```{r}
+#Combining training and test set 
+ind <- c("Item_Identifier","Outlet_Identifier")
+#df.sales <- rbind(train[,!(names(train)) %in% ind],test[,!(names(test)) %in% ind])
+df.sales <- rbind(train,test)
+#Missing values Summary
+Variable <- colnames(df.sales)
+NA_count <- sapply(df.sales, function(x) sum(is.na(x)))
+miss_summ <- data.frame(Variable,NA_count,row.names = NULL)
+miss_summ %>%
+  arrange(desc(NA_count))
+```
+
+```{r}
+#Treatment of missing values using Product ID
+item_summ <- unique(na.omit(df.sales[,c("Item_Identifier","Item_Weight")]))
+df.sales <- df.sales[,!(names(df.sales)) %in% c('Item_Weight')]
+df.sales <- full_join(df.sales,item_summ,by = "Item_Identifier")
+```
+
+```{r}
+outlet_summ <- df.sales %>%
+  group_by(Outlet_Identifier,Outlet_Size,Outlet_Type,Outlet_Establishment_Year,Outlet_Location_Type) %>%
+  summarise(median.visibility = median(Item_Visibility),count = n())
+```
+```{r}
+#There are 3 outlets with missing outlet size
+# We can only guess it for Outlet010 with some certainty
+df.sales$Outlet_Size[df.sales$Outlet_Identifier == "OUT010"] = "Small"
+df.sales$Outlet_Size[is.na(df.sales$Outlet_Size)] = "Other"
+
+```
+
+```{r}
+#Cleaning Data
+#Item Visibility can't be zero
+
+item_summ2 <- df.sales %>%
+  group_by(Item_Identifier) %>%
+  filter(Item_Visibility != 0) %>%
+  summarise(med.vis = median(Item_Visibility))
+
+df.sales <- full_join(df.sales,item_summ2,by = "Item_Identifier")
+df.sales$Item_Visibility <- ifelse(df.sales$Item_Visibility == 0,df.sales$med.vis,df.sales$Item_Visibility)
+df.sales <- df.sales[,!(names(df.sales) %in% c("med.vis"))]
+
+#Clean Fat content variable
+df.sales$Item_Fat_Content[df.sales$Item_Fat_Content == "LF"] = "Low Fat"
+df.sales$Item_Fat_Content[df.sales$Item_Fat_Content == "low fat"] = "Low Fat"
+df.sales$Item_Fat_Content[df.sales$Item_Fat_Content == "reg"] = "Regular"
+df.sales$Item_Fat_Content[substr(df.sales$Item_Identifier,1,2) == "NC"] = "Non-Edible"
+```
+
+```{r}
+#Feature Engineering
+df.sales$Item_Type <- substr(df.sales$Item_Identifier,1,2)
+df.sales$Year <- 2017 - df.sales$Outlet_Establishment_Year
+df.sales$Item_Outlet_Sales <- as.numeric(df.sales$Item_Outlet_Sales)
+library(dummies)
+df.sales.new <- droplevels(dummy.data.frame(df.sales, names = c('Item_Fat_Content','Outlet_Size','Outlet_Location_Type','Outlet_Type', 'Item_Type','Outlet_Identifier'),  sep='_', fun = as.factor))
+df.sales <- select(df.sales, -c(Outlet_Establishment_Year,Item_Identifier,Outlet_Identifier))
+
+```
+
+```{r}
+library(caret)
+new_train <- select(df.sales[1:nrow(train),],Item_MRP,Item_Outlet_Sales,Outlet_Type,Outlet_Size)
+new_test <- select(df.sales[-(1:nrow(train)),],Item_MRP,Item_Outlet_Sales,Outlet_Type,Outlet_Size)
+set.seed(1)
+linear_model <- train(
+  log(Item_Outlet_Sales) ~ ., new_train,
+  method = "lm",
+  trControl = trainControl(
+    method = "cv", number = 5,
+    verboseIter = TRUE
+  )
+)
+linear_model
+#linear_model <- lm(log(Item_Outlet_Sales)~.,data = new_train)
+#summary(linear_model)
+#par(mfrow=c(2,2))
+#plot(linear_model)
+lin_predict <- predict(linear_model, newdata = new_test)
+plot(varImp(linear_model))
+sub_file <- data.frame(Item_Identifier = test$Item_Identifier, Outlet_Identifier = test$Outlet_Identifier, Item_Outlet_Sales = exp(lin_predict))
+write.csv(sub_file, 'linear_regression_sales.csv',row.names = FALSE)
+
+# new_train <- df.sales[1:nrow(train),]
+# new_test <- df.sales[-(1:nrow(train)),]
+# set.seed(1)
+# myControl <- trainControl(
+#   method = "cv", number = 10,
+#   verboseIter = TRUE
+# )
+# 
+# model <- train(
+#   log(Item_Outlet_Sales) ~ ., new_train,
+#   tuneGrid = expand.grid(alpha = seq(0, 1, length = 10),
+#   lambda = 0.05),
+#   method = "glmnet",
+#   trControl = myControl
+# )
+# model
+# en_predict <- predict(model, newdata = new_test)
+# sub_file <- data.frame(Item_Identifier = test$Item_Identifier, Outlet_Identifier = test$Outlet_Identifier, Item_Outlet_Sales = exp(en_predict))
+# write.csv(sub_file, 'elastic_net_sales.csv',row.names = FALSE)
+```
+
+
+
+
+```{r}
+#setting the tree control parameters
+#fitControl <- trainControl(method = "cv", number = 5)
+#cartGrid <- expand.grid(.cp=(1:50)*0.01)
+#tree_model <- train(Item_Outlet_Sales ~ ., data = new_train, method = "rpart", trControl = fitControl, tuneGrid = cartGrid)
+#print(tree_model)
+#main_tree <- rpart(Item_Outlet_Sales ~ ., data = new_train, control = rpart.control(cp=0.01))
+#prp(main_tree)
+#pre_score <- predict(main_tree, type = "vector")
+#rmse(new_train$Item_Outlet_Sales, pre_score)
+#main_predict <- predict(main_tree, newdata = new_test, type = "vector")
+library(rpart.plot)
+new_train <- df.sales[1:nrow(train),]
+new_test <- df.sales[-(1:nrow(train)),]
+trctrl <- trainControl(method = "cv", number = 5)
+cartGrid <- expand.grid(.cp=(1:50)*0.001)
+dtree_fit <- train(Item_Outlet_Sales ~ ., data = new_train, method = "rpart", trControl = trctrl, tuneGrid = cartGrid)
+dtree_fit <- rpart(Item_Outlet_Sales ~ ., data = new_train, control = rpart.control(cp=0.002,maxdepth = 8,minbucket = 100))
+prp(dtree_fit)
+dt_predict_train <- predict(dtree_fit,newdata = new_train,type = "vector")
+rmse(new_train$Item_Outlet_Sales, dt_predict_train)
+dt_predict <- predict(dtree_fit,newdata = new_test,type = "vector")
+sub_file <- data.frame(Item_Identifier = test$Item_Identifier, Outlet_Identifier = test$Outlet_Identifier, Item_Outlet_Sales = dt_predict)
+write.csv(sub_file, 'Decision_tree_sales.csv',row.names = FALSE)
+
+```
+
+
+
+```{r}
+
+new_train <- df.sales.new[1:nrow(train),]
+new_test <- df.sales.new[-(1:nrow(train)),]
+library(randomForest)
+# new_train <- select(new_train,Item_MRP,Outlet_Type,Item_Visibility,Year,Item_Weight,Outlet_Size,Outlet_Location_Type,Item_Outlet_Sales)
+# new_test <- select(new_test,Item_MRP,Outlet_Type,Item_Visibility,Year,Item_Weight,Outlet_Size,Outlet_Location_Type,Item_Outlet_Sales)
+model <- train(
+  Item_Outlet_Sales ~ .,
+  data = new_train, method = "parRF",
+  trControl = trainControl(method = "cv", number = 5, verboseIter = TRUE)
+)
+#forest_model <- randomForest(Item_Outlet_Sales ~ ., data = new_train, mtry = 15, ntree = 1000)
+rf_predict <- predict(model,newdata = new_train, type = "raw")
+library(Metrics)
+rmse(new_train$Item_Outlet_Sales, rf_predict)
+rfm <- predict(model,newdata = new_test,type = "raw")
+
+sub_ens <- data.frame(Item_Identifier = test$Item_Identifier,Outlet_Identifier = test$Outlet_Identifier,lm = exp(lin_predict),dt = dt_predict, rf = rfm )
+sub_ens$Item_Outlet_Sales <- 0.1 * sub_ens$lm + 0.6 * sub_ens$dt + 0.3 * sub_ens$rf
+
+write.csv(sub_ens[,c("Item_Identifier","Outlet_Identifier","Item_Outlet_Sales")], 'Ensemble_lm_dt_rf_sales.csv',row.names = FALSE)
+```
+
+
+
+```{r}
+model_gbm <- train(Item_Outlet_Sales ~ .,
+                   data = new_train,
+                   method = "gbm",
+                   trControl = trainControl(method = "repeatedcv", number = 3, repeats = 5),
+                   verbose = FALSE)
+plot(model_gbm)
+p_gbm_train <- predict(model_gbm,new_train,type = "raw")
+rmse(new_train$Item_Outlet_Sales, p_gbm_train)
+p_gbm <- predict(model_gbm,new_test,type = "raw")
+sub_ens <- data.frame(Item_Identifier = test$Item_Identifier,Outlet_Identifier = test$Outlet_Identifier,lm = exp(lin_predict),dt = dt_predict, rf = rfm, gbm = p_gbm )
+sub_ens$Item_Outlet_Sales <- 0 * sub_ens$lm + 0.3 * sub_ens$dt + 0.6 * sub_ens$gbm + 0.1 * sub_ens$rf
+
+write.csv(sub_ens[,c("Item_Identifier","Outlet_Identifier","Item_Outlet_Sales")], 'Ensemble_lm_dt_gbm_sales.csv',row.names = FALSE)
+
+```
